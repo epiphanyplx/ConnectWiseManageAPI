@@ -1,0 +1,135 @@
+function ConvertPSObjectToHashtable
+{
+    param (
+        [Parameter(ValueFromPipeline)]
+        $InputObject
+    )
+
+    process
+    {
+        if ($null -eq $InputObject) { return $null }
+
+        if ($InputObject -is [System.Collections.IEnumerable] -and $InputObject -isnot [string])
+        {
+            $collection = @(
+                foreach ($object in $InputObject) { ConvertPSObjectToHashtable $object }
+            )
+
+            Write-Output -NoEnumerate $collection
+        }
+        elseif ($InputObject -is [psobject])
+        {
+            $hash = @{}
+
+            foreach ($property in $InputObject.PSObject.Properties)
+            {
+                $hash[$property.Name] = ConvertPSObjectToHashtable $property.Value
+            }
+
+            $hash
+        }
+        else
+        {
+            $InputObject
+        }
+    }
+}
+
+$CWMConnectionInfo = @{
+    # This is the URL to your manage server.
+    Server      = ''
+    # This is the company entered at login
+    Company     = ''
+    # Public key created for this integration
+    pubKey      = ''
+    # Private key created for this integration
+    privateKey  = ''
+    # Your ClientID found at https://developer.connectwise.com/ClientID
+    clientId    = ''
+}
+
+if (get-module -listavailable -name ConnectWiseManageAPI) {
+    connect-cwm @CWMConnectionInfo
+}
+else {
+    install-module 'ConnectWiseManageAPI'
+    connect-cwm @CWMConnectionInfo
+}
+
+$configs = Get-CWMCompanyConfiguration -condition 'type/name="Managed Workstation"' -all | ConvertPSObjectToHashtable
+$allcontacts = Get-CWMContact -all | ConvertPSObjectToHashtable
+
+#loop through CWM configs
+foreach ($config in $configs) {
+    $contacts = $allcontacts | where-object {$_.company.name -eq $config.company.name}
+    #remove domain/computer name from last logged in user if this info exists
+    if ($config.lastloginname -ne "" -and $config.lastloginname -ne $null) { 
+        if ($config.lastloginname -like "*\*") {
+            $user = ($config.lastloginname).split("\")[1]
+        }
+        else {
+            $user = $config.lastloginname
+        }
+        #loop through contacts
+        foreach ($contact in $contacts) {
+            #find email address assigned to contact
+            $email = $contact.communicationitems.value | where-object {$_ -like "*@*"}
+            #make sure email exists
+            if ($email -ne $null -and $email -ne "") {
+                #remove domain
+                $prefix = $email.split("@")[0]
+            }
+            else {
+                $prefix = $null
+            }
+            #if email address of contact matches last logged in user, assign as contact
+            if ($prefix -like "*$user*" -and $user -ne "" -and $user -ne $null -and $user -ne "codeblue" -and $user -ne "administrator") {
+                write-host "User matches email address - updating" $config.name "for" $config.company.name "with user" $user
+                Update-CWMCompanyConfiguration -id $config.id -operation replace -path 'contact/id' -value $contact.id
+            }
+            #get first and last name (if "firstname.lastname" format)
+            elseif ($user -like "*.*") {
+                $firstname = $user.split(".")[0]
+                $lastname = $user.split(".")[1]
+                #set as contact
+                if ($contact.firstname -eq $firstname -and $contact.lastname -eq $lastname) {
+                    Update-CWMCompanyConfiguration -id $config.id -operation replace -path 'contact/id' -value $contact.id
+                    write-host "User matches firstname.lastname format - updating" $config.name "for" $config.company.name "with user" $user
+                }
+            }
+            #get first and last name (if "firstname lastname" format)
+            elseif ($user -like "* *") {
+                $firstname = $user.split(" ")[0]
+                $lastname = $user.split(" ")[1]
+                #set as contact
+                if ($contact.firstname -eq $firstname -and $contact.lastname -eq $lastname) {
+                    Update-CWMCompanyConfiguration -id $config.id -operation replace -path 'contact/id' -value $contact.id
+                    write-host "User matches firstname lastname format - updating" $config.name "for" $config.company.name "with user" $user
+                }
+            }
+            else { 
+                #get first initial and last name (if "firstinitiallastname" format)
+                $fi = $user[0]
+                $ln = $user.substring(1)
+                #get first name and last initial (if "firstnamelastinitial" format)
+                $fn = $user.remove($user.get_length() - 1)
+                $li = $user.substring($user.get_length()-1)
+                #check if last logged in user is just a firstname or domain/computername\firstname, if so set as contact
+                if ($user -eq $contact.firstname -and $user -ne "codeblue" -and $user -ne "administrator") {
+                    Update-CWMCompanyConfiguration -id $config.id -operation replace -path 'contact/id' -value $contact.id
+                    write-host "User matches firstname format - updating" $config.name "for" $config.company.name "with user" $user
+                }
+                #check if last logged in user matches firstinitiallastname, if so set as contact
+                elseif ($contact.firstname -like "*$fi*" -and $contact.lastname -eq $ln -and $user -ne "codeblue" -and $user -ne "administrator") {
+                    Update-CWMCompanyConfiguration -id $config.id -operation replace -path 'contact/id' -value $contact.id
+                    write-host "User matches firstinitiallastname format - updating" $config.name "for" $config.company.name "with user" $user
+                }
+                #check if last logged in user matches firstnamelastinitial, if so set as contact
+                elseif ($contact.firstname -eq $fn -and $contact.lastname -like "*$li*" -and $user -ne "codeblue" -and $user -ne "administrator") {
+                    Update-CWMCompanyConfiguration -id $config.id -operation replace -path 'contact/id' -value $contact.id
+                    write-host "User matches firstnamelastinitial format - updating" $config.name "for" $config.company.name "with user" $user
+                } 
+            }
+        }
+    }
+}   
